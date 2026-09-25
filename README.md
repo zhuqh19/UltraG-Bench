@@ -2,6 +2,8 @@
 
 <img src="./Asset/introduction_fit.pdf" width="100%" alt="UltraG-Bench Introduction">
 
+<img src="./Asset/radar.pdf" width="100%" alt="UltraG-Bench Evaluation">
+
 UltraG-Bench is a grounded ultrasound benchmark for evaluating multimodal models on three complementary tasks:
 
 - Instruction-guided segmentation;
