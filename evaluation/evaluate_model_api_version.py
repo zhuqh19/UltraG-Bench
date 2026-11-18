@@ -18,8 +18,8 @@ from collections import Counter, defaultdict, OrderedDict
 from pathlib import Path
 
 
-DEFAULT_API_KEY = "token-abc123"
-DEFAULT_BASE_URL = "http://183.62.69.210:9002/v1"
+DEFAULT_API_KEY = ""
+DEFAULT_BASE_URL = ""
 DEFAULT_MODEL = "/data2/ZhuQuanhao/models/Lingshu-32B"
 
 BANNED_TERMS = ["annotation", "annotated", "dataset", "mask id", "metadata"]
@@ -123,6 +123,7 @@ METRIC_FIELDS = [
     "finding_type_precision",
     "finding_type_f1",
     "report_grounding_iou",
+    "report_grounding_dice",
     "report_grounding_recall_50",
     "presence_ok",
     "category_ok",
@@ -1163,7 +1164,13 @@ def score_prediction(record, pred, coco_index, mask_cache=None):
         pred_locs = extract_grid_locations(pred_text)
         location_ok = None if not ref_locs else pred_locs == ref_locs
         size_ok = size_matches(pred_text, ref_text)
-        semantic_values = [value for value in (presence_ok, category_ok, location_ok, size_ok) if value is not None]
+        # Fixed four-attribute SemAcc: missing reference-supported attributes score 0.
+        # This ensures every report uses the same denominator (4), and that the
+        # four exported *_ok fields have the same image/sample aggregation scope.
+        semantic_values = [
+            int(value) if value is not None else 0
+            for value in (presence_ok, category_ok, location_ok, size_ok)
+        ]
 
         spatial_types = reference_spatial_finding_types(ref_report)
         pred_by_type = {
@@ -1171,6 +1178,7 @@ def score_prediction(record, pred, coco_index, mask_cache=None):
             for sentence in pred_report if isinstance(sentence, dict) and sentence.get("finding_type")
         }
         grounding_scores = []
+        grounding_dice_scores = []
         for ref_sentence in ref_report:
             if not isinstance(ref_sentence, dict) or ref_sentence.get("finding_type") not in spatial_types:
                 continue
@@ -1180,7 +1188,9 @@ def score_prediction(record, pred, coco_index, mask_cache=None):
             ref_pixels, width, height = gt_pixels(evidence_ids, coco_index, record, mask_cache)
             pred_sentence = pred_by_type.get(ref_sentence.get("finding_type"), {})
             pred_pixels = pred_mask_pixels(pred_sentence.get("predicted_mask"), width, height)
-            grounding_scores.append(iou_dice(pred_pixels, ref_pixels)[0])
+            sentence_iou, sentence_dice = iou_dice(pred_pixels, ref_pixels)
+            grounding_scores.append(sentence_iou)
+            grounding_dice_scores.append(sentence_dice)
         metrics.update({
             "bleu_1": bleu_n(pred_text, ref_text, 1),
             "bleu_2": bleu_n(pred_text, ref_text, 2),
@@ -1192,12 +1202,15 @@ def score_prediction(record, pred, coco_index, mask_cache=None):
             "finding_type_precision": type_precision,
             "finding_type_f1": type_f1,
             "report_grounding_iou": statistics.mean(grounding_scores) if grounding_scores else "",
+            "report_grounding_dice": statistics.mean(grounding_dice_scores) if grounding_dice_scores else "",
+            "iou": statistics.mean(grounding_scores) if grounding_scores else "",
+            "dice": statistics.mean(grounding_dice_scores) if grounding_dice_scores else "",
             "report_grounding_recall_50": statistics.mean(score > 0.5 for score in grounding_scores) if grounding_scores else "",
-            "presence_ok": int(presence_ok) if presence_ok is not None else "",
-            "category_ok": int(category_ok) if category_ok is not None else "",
-            "location_ok": int(location_ok) if location_ok is not None else "",
-            "size_ok": int(size_ok) if size_ok is not None else "",
-            "semantic_accuracy": statistics.mean(semantic_values) if semantic_values else "",
+            "presence_ok": int(presence_ok) if presence_ok is not None else 0,
+            "category_ok": int(category_ok) if category_ok is not None else 0,
+            "location_ok": int(location_ok) if location_ok is not None else 0,
+            "size_ok": int(size_ok) if size_ok is not None else 0,
+            "semantic_accuracy": sum(semantic_values) / 4.0,
             "unsupported_descriptor_count": len(unsupported_hits(pred_text)),
             "banned_term_hits": len(banned_hits(pred_text)),
         })
