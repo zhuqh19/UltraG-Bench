@@ -18,6 +18,21 @@ import torch
 from PIL import Image
 
 
+def configure_csv_field_size_limit():
+    """Raise csv's per-field limit for large JSON and mask payloads."""
+    limit = sys.maxsize
+    while limit > 0:
+        try:
+            csv.field_size_limit(limit)
+            return limit
+        except OverflowError:
+            limit //= 10
+    raise RuntimeError("Unable to configure a usable CSV field-size limit")
+
+
+CSV_FIELD_SIZE_LIMIT = configure_csv_field_size_limit()
+
+
 DEFAULT_AGENT_SCRIPT = str(
     Path(__file__).resolve().with_name("inference_agent_grounded.py")
 )
@@ -128,6 +143,7 @@ METRIC_FIELDS = [
     "finding_type_precision",
     "finding_type_f1",
     "report_grounding_iou",
+    "report_grounding_dice",
     "report_grounding_recall_50",
     "presence_ok",
     "category_ok",
@@ -1201,14 +1217,17 @@ def score_prediction(
         location_ok = None if not ref_locs else pred_locs == ref_locs
         size_ok = size_matches(pred_text, ref_text)
         extent_ok = percentage_matches(pred_text, ref_text)
+        # Fixed four-attribute SemAcc: missing reference-supported attributes score 0.
+        # This ensures every report uses the same denominator (4), and that the
+        # four exported *_ok fields have the same image/sample aggregation scope.
         semantic_values = [
-            value
-            for value in (presence_ok, category_ok, location_ok, size_ok, extent_ok)
-            if value is not None
+            int(value) if value is not None else 0
+            for value in (presence_ok, category_ok, location_ok, size_ok)
         ]
 
         spatial_types = reference_spatial_finding_types(ref_report)
         grounding_scores = []
+        grounding_dice_scores = []
         for ref_sentence in ref_report:
             if not isinstance(ref_sentence, dict):
                 continue
@@ -1224,7 +1243,9 @@ def score_prediction(
             )
             pred_sentence = best_predicted_sentence(ref_sentence, pred_report)
             pred_pixels = pred_mask_pixels(pred_sentence.get("predicted_mask"), width, height)
-            grounding_scores.append(iou_dice(pred_pixels, ref_pixels)[0])
+            sentence_iou, sentence_dice = iou_dice(pred_pixels, ref_pixels)
+            grounding_scores.append(sentence_iou)
+            grounding_dice_scores.append(sentence_dice)
         metrics.update({
             "bleu_1": bleu_n(pred_text, ref_text, 1),
             "bleu_2": bleu_n(pred_text, ref_text, 2),
@@ -1236,13 +1257,16 @@ def score_prediction(
             "finding_type_precision": type_precision,
             "finding_type_f1": type_f1,
             "report_grounding_iou": statistics.mean(grounding_scores) if grounding_scores else "",
+            "report_grounding_dice": statistics.mean(grounding_dice_scores) if grounding_dice_scores else "",
+            "iou": statistics.mean(grounding_scores) if grounding_scores else "",
+            "dice": statistics.mean(grounding_dice_scores) if grounding_dice_scores else "",
             "report_grounding_recall_50": statistics.mean(score > 0.5 for score in grounding_scores) if grounding_scores else "",
-            "presence_ok": int(presence_ok) if presence_ok is not None else "",
-            "category_ok": int(category_ok) if category_ok is not None else "",
-            "location_ok": int(location_ok) if location_ok is not None else "",
-            "size_ok": int(size_ok) if size_ok is not None else "",
+            "presence_ok": int(presence_ok) if presence_ok is not None else 0,
+            "category_ok": int(category_ok) if category_ok is not None else 0,
+            "location_ok": int(location_ok) if location_ok is not None else 0,
+            "size_ok": int(size_ok) if size_ok is not None else 0,
             "extent_ok": int(extent_ok) if extent_ok is not None else "",
-            "semantic_accuracy": statistics.mean(semantic_values) if semantic_values else "",
+            "semantic_accuracy": sum(semantic_values) / 4.0,
             "unsupported_descriptor_count": len(unsupported_hits(pred_text)),
             "banned_term_hits": len(banned_hits(pred_text)),
         })
